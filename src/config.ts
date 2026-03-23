@@ -6,6 +6,7 @@ import { parse as parseYaml } from "yaml";
 
 export interface SentinelConfig {
   repos: string[];
+  orgs: string[];
   polling: {
     interval: number; // seconds
   };
@@ -41,6 +42,7 @@ export interface TriageConfig {
 
 const DEFAULTS: SentinelConfig = {
   repos: [],
+  orgs: [],
   polling: { interval: 60 },
   model: "claude-sonnet-4-20250514",
   mode: "reviewer",
@@ -62,15 +64,20 @@ const DEFAULTS: SentinelConfig = {
   },
 };
 
-export function loadConfig(configPath?: string, cliMode?: string): SentinelConfig {
-  const path = configPath ?? process.env.CONFIG_PATH ?? "./config.yaml";
+export function loadConfig(
+  configPath?: string,
+  cliMode?: string,
+  cliRepos?: string[],
+  cliOrgs?: string[],
+  env: Record<string, string | undefined> = process.env,
+): SentinelConfig {
+  const path = configPath ?? env.CONFIG_PATH ?? "./config.yaml";
   let fileConfig: Record<string, unknown> = {};
 
   if (existsSync(path)) {
     const raw = readFileSync(path, "utf-8");
     fileConfig = parseYaml(raw) ?? {};
   } else if (configPath) {
-    // Explicitly specified path that doesn't exist — error
     throw new Error(`Config file not found: ${path}`);
   }
 
@@ -84,26 +91,37 @@ export function loadConfig(configPath?: string, cliMode?: string): SentinelConfi
     triage: { ...DEFAULTS.triage, ...(fileConfig.triage as Record<string, unknown> ?? {}) },
   } as SentinelConfig;
 
+  // Ensure orgs is always an array
+  if (!Array.isArray(config.orgs)) {
+    config.orgs = [];
+  }
+
   // CLI overrides
   if (cliMode) {
     config.mode = cliMode as SentinelMode;
   }
+  if (cliRepos && cliRepos.length > 0) {
+    config.repos = cliRepos;
+  }
+  if (cliOrgs && cliOrgs.length > 0) {
+    config.orgs = cliOrgs;
+  }
 
   // Env overrides
-  if (process.env.LOG_LEVEL) {
-    config.logLevel = process.env.LOG_LEVEL as SentinelConfig["logLevel"];
+  if (env.LOG_LEVEL) {
+    config.logLevel = env.LOG_LEVEL as SentinelConfig["logLevel"];
   }
 
   // Validation
-  if (!config.repos.length) {
-    throw new Error("No repos configured. Add repos to config.yaml or pass --repos.");
+  if (!config.repos.length && !config.orgs.length) {
+    throw new Error("No repos or orgs configured. Add repos/orgs to config.yaml or pass --repos/--orgs.");
   }
 
-  if (!process.env.ANTHROPIC_API_KEY) {
+  if (!env.ANTHROPIC_API_KEY) {
     throw new Error("ANTHROPIC_API_KEY environment variable is required.");
   }
 
-  if (!process.env.GITHUB_TOKEN && !process.env.GH_TOKEN) {
+  if (!env.GITHUB_TOKEN && !env.GH_TOKEN) {
     throw new Error("GITHUB_TOKEN or GH_TOKEN environment variable is required.");
   }
 

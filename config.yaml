@@ -6,6 +6,11 @@ repos:
   - paw-engineering/paw-hub
   - paw-engineering/ship-api
 
+# GitHub organizations — all non-archived repos in these orgs will be watched
+orgs: []
+  # - lobs-ai
+  # - paw-engineering
+
 # Polling settings
 polling:
   interval: 120  # seconds between polls

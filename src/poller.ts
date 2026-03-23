@@ -3,6 +3,7 @@
  */
 import { log } from "./log.js";
 import type { SentinelConfig } from "./config.js";
+import { resolveRepos } from "./resolver.js";
 
 export interface PollHandler {
   /** Called each poll cycle with the list of repos. */
@@ -13,16 +14,26 @@ export interface PollHandler {
  * Start the polling loop. Runs forever until the process is killed.
  */
 export async function startPolling(config: SentinelConfig, handler: PollHandler): Promise<never> {
-  const { repos, polling } = config;
+  const { polling } = config;
 
+  // Resolve repos (expand orgs) at startup
+  let repos = resolveRepos(config);
   log.info(`Polling ${repos.length} repo(s) every ${polling.interval}s`, { repos });
 
   // Run immediately on start
   await runPollCycle(repos, handler);
 
   // Then loop
+  let cycleCount = 0;
   while (true) {
     await sleep(polling.interval * 1000);
+    cycleCount++;
+
+    // Re-resolve orgs every 10 cycles to pick up new repos
+    if (config.orgs.length > 0 && cycleCount % 10 === 0) {
+      repos = resolveRepos(config);
+    }
+
     await runPollCycle(repos, handler);
   }
 }

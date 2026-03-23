@@ -2,7 +2,7 @@
  * GitHub API helpers — uses gh CLI for all interactions.
  * This keeps auth simple (gh handles tokens) and avoids REST API complexity.
  */
-import { execSync, execFileSync } from "child_process";
+import { execFileSync } from "child_process";
 import { log } from "./log.js";
 
 export interface PullRequest {
@@ -48,35 +48,9 @@ export interface ReviewComment {
 }
 
 /**
- * Run a gh CLI command and return parsed JSON output.
- */
-function gh<T>(args: string[], repo?: string): T {
-  const fullArgs = ["gh", ...args];
-  if (repo) {
-    fullArgs.push("--repo", repo);
-  }
-  fullArgs.push("--json");
-
-  log.debug(`gh: ${fullArgs.join(" ")}`);
-
-  try {
-    const result = execFileSync(fullArgs[0], fullArgs.slice(1), {
-      encoding: "utf-8",
-      timeout: 30_000,
-      env: { ...process.env },
-    });
-    return JSON.parse(result) as T;
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    log.error(`gh command failed: ${fullArgs.join(" ")}`, { error: msg });
-    throw err;
-  }
-}
-
-/**
  * Run a gh CLI command with explicit fields and return parsed JSON.
  */
-function ghWithFields<T>(baseArgs: string[], fields: string[], repo?: string): T {
+export function ghWithFields<T>(baseArgs: string[], fields: string[], repo?: string): T {
   const fullArgs = [...baseArgs, "--json", fields.join(",")];
   if (repo) {
     fullArgs.push("--repo", repo);
@@ -101,7 +75,7 @@ function ghWithFields<T>(baseArgs: string[], fields: string[], repo?: string): T
 /**
  * Run a raw gh command (no --json), return stdout.
  */
-function ghRaw(args: string[]): string {
+export function ghRaw(args: string[]): string {
   log.debug(`gh raw: gh ${args.join(" ")}`);
   try {
     return execFileSync("gh", args, {
@@ -114,6 +88,26 @@ function ghRaw(args: string[]): string {
     log.error(`gh raw command failed: gh ${args.join(" ")}`, { error: msg });
     throw err;
   }
+}
+
+// ── Organizations ──────────────────────────────────────────────────────────
+
+interface GhRepoRaw {
+  nameWithOwner: string;
+  isArchived: boolean;
+}
+
+/**
+ * List all non-archived repos in a GitHub org.
+ */
+export function listOrgRepos(org: string): string[] {
+  const raw = ghWithFields<GhRepoRaw[]>(
+    ["repo", "list", org, "--no-archived", "--limit", "200"],
+    ["nameWithOwner", "isArchived"],
+  );
+  return raw
+    .filter((r) => !r.isArchived)
+    .map((r) => r.nameWithOwner);
 }
 
 // ── Pull Requests ──────────────────────────────────────────────────────────
@@ -177,7 +171,6 @@ export function getPRDiff(repo: string, prNumber: number): string {
  * Get the list of files changed in a PR.
  */
 export function getPRFiles(repo: string, prNumber: number): PullRequestFile[] {
-  // gh pr diff --name-only gives us file paths
   const nameOutput = ghRaw(["pr", "diff", String(prNumber), "--repo", repo, "--name-only"]);
   const paths = nameOutput.trim().split("\n").filter(Boolean);
 
