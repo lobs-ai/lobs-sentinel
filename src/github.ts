@@ -312,3 +312,116 @@ export function hasExistingReview(repo: string, prNumber: number, marker: string
     return false;
   }
 }
+
+// ── PR Context (comments, reviews, commits) ───────────────────────────────
+
+export interface PRComment {
+  author: string;
+  body: string;
+  createdAt: string;
+}
+
+export interface PRReviewThread {
+  author: string;
+  body: string;
+  state: string; // APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED
+  createdAt: string;
+  comments: PRReviewComment[];
+}
+
+export interface PRReviewComment {
+  author: string;
+  body: string;
+  path: string;
+  line: number | null;
+  createdAt: string;
+}
+
+export interface PRCommit {
+  sha: string;
+  message: string;
+  author: string;
+}
+
+/**
+ * Get all issue-level comments on a PR (not inline review comments).
+ */
+export function getPRComments(repo: string, prNumber: number): PRComment[] {
+  try {
+    const raw = ghRaw([
+      "api", `repos/${repo}/issues/${prNumber}/comments`,
+      "--jq", `[.[] | {author: .user.login, body: .body, createdAt: .created_at}]`,
+    ]);
+    const trimmed = raw.trim();
+    if (!trimmed || trimmed === "[]") return [];
+    return JSON.parse(trimmed) as PRComment[];
+  } catch {
+    log.debug(`Failed to fetch comments for ${repo}#${prNumber}`);
+    return [];
+  }
+}
+
+/**
+ * Get all reviews and their inline comments on a PR.
+ */
+export function getPRReviews(repo: string, prNumber: number): PRReviewThread[] {
+  try {
+    // Get reviews (top-level review submissions)
+    const reviewsRaw = ghRaw([
+      "api", `repos/${repo}/pulls/${prNumber}/reviews`,
+      "--jq", `[.[] | {author: .user.login, body: .body, state: .state, createdAt: .submitted_at}]`,
+    ]);
+    const reviews: PRReviewThread[] = JSON.parse(reviewsRaw.trim() || "[]");
+
+    // Get inline review comments (threaded on specific lines)
+    const commentsRaw = ghRaw([
+      "api", `repos/${repo}/pulls/${prNumber}/comments`,
+      "--jq", `[.[] | {author: .user.login, body: .body, path: .path, line: .line, createdAt: .created_at}]`,
+    ]);
+    const comments: PRReviewComment[] = JSON.parse(commentsRaw.trim() || "[]");
+
+    // Attach inline comments to the reviews as a flat list
+    // (GitHub's API doesn't directly link them without pull_request_review_id,
+    //  so we include them all — the LLM will understand the context)
+    if (reviews.length > 0) {
+      reviews[reviews.length - 1].comments = comments;
+    } else if (comments.length > 0) {
+      // Orphaned comments (no review submission) — create a synthetic review
+      reviews.push({
+        author: comments[0].author,
+        body: "",
+        state: "COMMENTED",
+        createdAt: comments[0].createdAt,
+        comments,
+      });
+    }
+
+    // Ensure all reviews have comments array
+    for (const r of reviews) {
+      if (!r.comments) r.comments = [];
+    }
+
+    return reviews;
+  } catch {
+    log.debug(`Failed to fetch reviews for ${repo}#${prNumber}`);
+    return [];
+  }
+}
+
+/**
+ * Get the commit list for a PR.
+ */
+export function getPRCommits(repo: string, prNumber: number): PRCommit[] {
+  try {
+    const raw = ghRaw([
+      "api", `repos/${repo}/pulls/${prNumber}/commits`,
+      "--jq", `[.[] | {sha: .sha[0:8], message: .commit.message, author: .commit.author.name}]`,
+    ]);
+    const trimmed = raw.trim();
+    if (!trimmed || trimmed === "[]") return [];
+    return JSON.parse(trimmed) as PRCommit[];
+  } catch {
+    log.debug(`Failed to fetch commits for ${repo}#${prNumber}`);
+    return [];
+  }
+}

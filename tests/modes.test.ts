@@ -16,6 +16,9 @@ vi.mock("../src/github.js", () => ({
   ghRaw: vi.fn(),
   getPRFiles: vi.fn(),
   getFileContent: vi.fn(),
+  getPRComments: vi.fn(),
+  getPRReviews: vi.fn(),
+  getPRCommits: vi.fn(),
 }));
 
 vi.mock("../src/llm.js", () => ({
@@ -31,6 +34,9 @@ import {
   addLabels,
   hasExistingReview,
   hasAlreadyProcessed,
+  getPRComments,
+  getPRReviews,
+  getPRCommits,
 } from "../src/github.js";
 import { ask } from "../src/llm.js";
 import { createReviewer } from "../src/modes/reviewer.js";
@@ -82,9 +88,17 @@ describe("getHandler", () => {
   });
 });
 
+// Helper to set up default context mocks for reviewer tests
+function setupReviewerContextMocks() {
+  vi.mocked(getPRComments).mockReturnValue([]);
+  vi.mocked(getPRReviews).mockReturnValue([]);
+  vi.mocked(getPRCommits).mockReturnValue([]);
+}
+
 describe("reviewer mode", () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    setupReviewerContextMocks();
   });
 
   it("reviews open PRs that haven't been reviewed", async () => {
@@ -115,12 +129,133 @@ describe("reviewer mode", () => {
 
     expect(listOpenPRs).toHaveBeenCalledWith("test/repo");
     expect(getPRDiff).toHaveBeenCalledWith("test/repo", 1);
+    expect(getPRComments).toHaveBeenCalledWith("test/repo", 1);
+    expect(getPRReviews).toHaveBeenCalledWith("test/repo", 1);
+    expect(getPRCommits).toHaveBeenCalledWith("test/repo", 1);
     expect(ask).toHaveBeenCalledOnce();
     expect(submitReview).toHaveBeenCalledWith(
       "test/repo", 1,
       expect.stringContaining("Looks good!"),
       "COMMENT", // auto_approve is false, so APPROVE becomes COMMENT
     );
+  });
+
+  it("includes PR comments in the prompt", async () => {
+    vi.mocked(listOpenPRs).mockReturnValue([{
+      number: 10,
+      title: "Feature PR",
+      body: "",
+      author: "testuser",
+      state: "OPEN",
+      isDraft: false,
+      url: "https://github.com/test/repo/pull/10",
+      headRef: "feat",
+      baseRef: "main",
+      repo: "test/repo",
+      updatedAt: "2025-02-01T00:00:00Z",
+      labels: [],
+    }]);
+    vi.mocked(hasExistingReview).mockReturnValue(false);
+    vi.mocked(getPRDiff).mockReturnValue("diff");
+    vi.mocked(getPRComments).mockReturnValue([
+      { author: "alice", body: "Can you add tests for this?", createdAt: "2025-02-01T12:00:00Z" },
+      { author: "testuser", body: "Done, added tests in the latest push.", createdAt: "2025-02-01T13:00:00Z" },
+    ]);
+    vi.mocked(ask).mockResolvedValue({
+      text: "LGTM\n\nVERDICT: COMMENT",
+      inputTokens: 100,
+      outputTokens: 50,
+    });
+
+    const handler = createReviewer(makeConfig());
+    await handler.poll(["test/repo"]);
+
+    // Verify the prompt sent to the LLM includes the discussion
+    const askCall = vi.mocked(ask).mock.calls[0][0];
+    expect(askCall.prompt).toContain("Can you add tests for this?");
+    expect(askCall.prompt).toContain("Done, added tests in the latest push.");
+    expect(askCall.prompt).toContain("Discussion");
+  });
+
+  it("includes review threads with inline comments in the prompt", async () => {
+    vi.mocked(listOpenPRs).mockReturnValue([{
+      number: 11,
+      title: "Feature PR",
+      body: "",
+      author: "testuser",
+      state: "OPEN",
+      isDraft: false,
+      url: "https://github.com/test/repo/pull/11",
+      headRef: "feat",
+      baseRef: "main",
+      repo: "test/repo",
+      updatedAt: "2025-03-01T00:00:00Z",
+      labels: [],
+    }]);
+    vi.mocked(hasExistingReview).mockReturnValue(false);
+    vi.mocked(getPRDiff).mockReturnValue("diff");
+    vi.mocked(getPRReviews).mockReturnValue([{
+      author: "bob",
+      body: "A few things to fix",
+      state: "CHANGES_REQUESTED",
+      createdAt: "2025-01-01T14:00:00Z",
+      comments: [
+        { author: "bob", body: "This should handle null", path: "src/handler.ts", line: 42, createdAt: "2025-01-01T14:00:00Z" },
+      ],
+    }]);
+    vi.mocked(ask).mockResolvedValue({
+      text: "Agreed with Bob's feedback.\n\nVERDICT: REQUEST_CHANGES",
+      inputTokens: 100,
+      outputTokens: 50,
+    });
+
+    const handler = createReviewer(makeConfig());
+    await handler.poll(["test/repo"]);
+
+    const askCall = vi.mocked(ask).mock.calls[0][0];
+    expect(askCall.prompt).toContain("Existing Reviews");
+    expect(askCall.prompt).toContain("A few things to fix");
+    expect(askCall.prompt).toContain("This should handle null");
+    expect(askCall.prompt).toContain("src/handler.ts:42");
+    expect(askCall.prompt).toContain("requested changes");
+  });
+
+  it("includes commits in the prompt", async () => {
+    vi.mocked(listOpenPRs).mockReturnValue([{
+      number: 12,
+      title: "Multi-commit PR",
+      body: "",
+      author: "testuser",
+      state: "OPEN",
+      isDraft: false,
+      url: "https://github.com/test/repo/pull/12",
+      headRef: "feat",
+      baseRef: "main",
+      repo: "test/repo",
+      updatedAt: "2025-04-01T00:00:00Z",
+      labels: [],
+    }]);
+    vi.mocked(hasExistingReview).mockReturnValue(false);
+    vi.mocked(getPRDiff).mockReturnValue("diff");
+    vi.mocked(getPRCommits).mockReturnValue([
+      { sha: "abc12345", message: "initial implementation", author: "Test User" },
+      { sha: "def67890", message: "address review feedback\n\nFix null handling", author: "Test User" },
+    ]);
+    vi.mocked(ask).mockResolvedValue({
+      text: "LGTM\n\nVERDICT: APPROVE",
+      inputTokens: 100,
+      outputTokens: 50,
+    });
+
+    const handler = createReviewer(makeConfig());
+    await handler.poll(["test/repo"]);
+
+    const askCall = vi.mocked(ask).mock.calls[0][0];
+    expect(askCall.prompt).toContain("Commits (2)");
+    expect(askCall.prompt).toContain("abc12345");
+    expect(askCall.prompt).toContain("initial implementation");
+    expect(askCall.prompt).toContain("def67890");
+    expect(askCall.prompt).toContain("address review feedback");
   });
 
   it("skips draft PRs when ignore_drafts is true", async () => {
@@ -257,6 +392,41 @@ describe("reviewer mode", () => {
     const handler = createReviewer(makeConfig());
     await handler.poll(["bad/repo", "good/repo"]);
     expect(listOpenPRs).toHaveBeenCalledTimes(2);
+  });
+
+  it("gracefully handles context fetch failures", async () => {
+    vi.mocked(listOpenPRs).mockReturnValue([{
+      number: 13,
+      title: "PR with broken context",
+      body: "",
+      author: "testuser",
+      state: "OPEN",
+      isDraft: false,
+      url: "https://github.com/test/repo/pull/13",
+      headRef: "feat",
+      baseRef: "main",
+      repo: "test/repo",
+      updatedAt: "2025-05-01T00:00:00Z",
+      labels: [],
+    }]);
+    vi.mocked(hasExistingReview).mockReturnValue(false);
+    vi.mocked(getPRDiff).mockReturnValue("diff --git a/file.ts\n+code");
+    // Context functions return empty (as they would on API failure — they catch internally)
+    vi.mocked(getPRComments).mockReturnValue([]);
+    vi.mocked(getPRReviews).mockReturnValue([]);
+    vi.mocked(getPRCommits).mockReturnValue([]);
+    vi.mocked(ask).mockResolvedValue({
+      text: "Looks fine.\n\nVERDICT: COMMENT",
+      inputTokens: 50,
+      outputTokens: 20,
+    });
+
+    const handler = createReviewer(makeConfig());
+    await handler.poll(["test/repo"]);
+
+    // Should still work — context is optional enrichment
+    expect(ask).toHaveBeenCalledOnce();
+    expect(submitReview).toHaveBeenCalled();
   });
 });
 

@@ -1,14 +1,27 @@
 /**
- * PR Reviewer mode — reviews open pull requests.
+ * PR Reviewer mode — reviews open pull requests with full context.
  *
  * For each open PR that hasn't been reviewed yet:
- * 1. Fetch the diff
- * 2. Send to LLM with review instructions
- * 3. Post the review as a GitHub review (comment/approve/request changes)
+ * 1. Fetch the diff, commits, existing comments, and review threads
+ * 2. Build a rich context prompt with all discussion history
+ * 3. Send to LLM with expert review instructions
+ * 4. Post the review as a GitHub review (comment/approve/request changes)
  */
 import type { PollHandler } from "../poller.js";
 import type { SentinelConfig, ReviewerConfig } from "../config.js";
-import { listOpenPRs, getPRDiff, submitReview, hasExistingReview, type PullRequest } from "../github.js";
+import {
+  listOpenPRs,
+  getPRDiff,
+  submitReview,
+  hasExistingReview,
+  getPRComments,
+  getPRReviews,
+  getPRCommits,
+  type PullRequest,
+  type PRComment,
+  type PRReviewThread,
+  type PRCommit,
+} from "../github.js";
 import { ask } from "../llm.js";
 import { log } from "../log.js";
 
@@ -65,14 +78,18 @@ async function reviewRepo(repo: string, rc: ReviewerConfig, model: string): Prom
 }
 
 async function reviewPR(repo: string, pr: PullRequest, rc: ReviewerConfig, model: string): Promise<void> {
-  // Get the diff
+  // Gather all context in parallel-ish (they're sync gh CLI calls, but semantically parallel)
   let diff: string;
   try {
     diff = getPRDiff(repo, pr.number);
-  } catch (err) {
+  } catch {
     log.error(`Failed to get diff for ${repo}#${pr.number}`);
     return;
   }
+
+  const comments = getPRComments(repo, pr.number);
+  const reviews = getPRReviews(repo, pr.number);
+  const commits = getPRCommits(repo, pr.number);
 
   // Truncate very large diffs
   const MAX_DIFF_CHARS = 100_000;
@@ -82,7 +99,7 @@ async function reviewPR(repo: string, pr: PullRequest, rc: ReviewerConfig, model
   }
 
   const system = buildSystemPrompt(rc);
-  const prompt = buildReviewPrompt(pr, diff, truncated);
+  const prompt = buildReviewPrompt(pr, diff, truncated, comments, reviews, commits);
 
   const response = await ask({ model, system, prompt, maxTokens: 4096 });
 
@@ -99,54 +116,180 @@ async function reviewPR(repo: string, pr: PullRequest, rc: ReviewerConfig, model
   });
 }
 
+// ── System Prompt ────────────────────────────────────────────────────────────
+
 function buildSystemPrompt(rc: ReviewerConfig): string {
-  let style = "";
-  switch (rc.style) {
-    case "thorough":
-      style = `You do thorough code reviews. Check for bugs, logic errors, edge cases, performance issues, security concerns, and code quality. Be specific and reference line numbers from the diff when possible.`;
-      break;
-    case "quick":
-      style = `You do focused code reviews. Concentrate on bugs, security issues, and major design problems. Skip style nits and minor issues.`;
-      break;
-    case "security-focused":
-      style = `You do security-focused code reviews. Prioritize finding security vulnerabilities, injection risks, auth issues, data leaks, and unsafe patterns. Note other serious bugs if you spot them, but security is your primary focus.`;
-      break;
-  }
+  const styleParagraph = {
+    thorough: `You perform thorough, senior-engineer-level code reviews. You check for correctness bugs, logic errors, off-by-one mistakes, unhandled edge cases, race conditions, resource leaks, error handling gaps, performance footguns, and security vulnerabilities. You also evaluate code organization, naming clarity, and whether the abstractions make sense. You reference specific lines from the diff when pointing out issues.`,
 
-  const instructions = rc.custom_instructions ? `\n\nAdditional instructions from the project maintainers:\n${rc.custom_instructions}` : "";
+    quick: `You perform focused code reviews optimized for speed. You concentrate on correctness bugs, security vulnerabilities, and major design problems that would cause real harm if merged. You skip style nits, naming bikesheds, and minor issues — only flag things that matter.`,
 
-  return `You are a code reviewer. Your job is to review pull requests and provide constructive, actionable feedback.
+    "security-focused": `You perform security-focused code reviews. Your primary goal is finding security vulnerabilities: injection attacks (SQL, XSS, command injection), authentication/authorization bypasses, insecure cryptography, sensitive data exposure, SSRF, path traversal, deserialization issues, and unsafe dependency usage. You also note serious correctness bugs if you spot them, but security is always your first priority.`,
+  }[rc.style];
 
-${style}
+  const instructions = rc.custom_instructions
+    ? `\n\nThe project maintainers have provided these additional review instructions — follow them:\n${rc.custom_instructions}`
+    : "";
 
-Format your review as markdown. Start with a brief summary of what the PR does, then list any issues you found organized by severity (critical → minor). End with an overall assessment.
+  return `You are an expert code reviewer acting as an automated reviewer on GitHub pull requests. You have been integrated into a CI/review pipeline and your reviews will be posted directly as GitHub PR reviews.
 
-At the very end of your review, on its own line, output exactly one of these verdicts:
-- VERDICT: APPROVE — if the code looks good or only has trivial issues
-- VERDICT: COMMENT — if you have suggestions but nothing blocking
-- VERDICT: REQUEST_CHANGES — if there are bugs, security issues, or significant problems that should be fixed
+## Your Review Philosophy
 
-Be constructive, not nitpicky. The goal is to catch real problems, not enforce style preferences unless they affect readability significantly.${instructions}`;
+You review code the way a thoughtful senior engineer would — someone who's seen production incidents and knows what actually causes them. You care about **correctness above all else**, followed by security, then maintainability. You don't waste the author's time on things that don't matter.
+
+${styleParagraph}
+
+## What You Receive
+
+You'll be given:
+- The PR title, description, branch info, and labels
+- The full diff of changes
+- The commit history (to understand the progression of changes)
+- All existing PR comments and review threads (to understand ongoing discussions)
+
+**The existing comments and reviews are critical context.** They tell you:
+- What feedback has already been given (don't repeat it)
+- What discussions are in progress (build on them, don't restart them)
+- What the author has already addressed or pushed back on
+- Whether previous reviewers approved, requested changes, or raised concerns
+
+## How to Write Your Review
+
+1. **Summary** — Start with 1-2 sentences about what this PR does and your overall impression. Be direct.
+
+2. **Issues** — List concrete issues you found, organized by severity. For each issue:
+   - State clearly what the problem is
+   - Reference the specific file and code from the diff
+   - Explain *why* it's a problem (what could go wrong)
+   - Suggest a fix when you have one
+   
+   Severity levels:
+   - 🔴 **Critical** — Bugs, security holes, data loss risks. Must fix before merge.
+   - 🟡 **Warning** — Likely problems, error handling gaps, performance issues. Should fix.
+   - 🔵 **Suggestion** — Improvements to clarity, maintainability, or robustness. Nice to have.
+
+3. **Context-Aware Notes** — If other reviewers have already flagged issues:
+   - Don't re-raise the same concern unless you have something new to add
+   - If the author responded to feedback, acknowledge whether their fix addresses it
+   - If you disagree with another reviewer's suggestion, say so respectfully and explain why
+
+4. **Verdict** — End with exactly one of these on its own line:
+   - \`VERDICT: APPROVE\` — Code is good to merge, or only has trivial/optional suggestions
+   - \`VERDICT: COMMENT\` — You have feedback worth discussing, but nothing strictly blocking
+   - \`VERDICT: REQUEST_CHANGES\` — There are bugs, security issues, or significant problems that must be fixed
+
+## Rules
+
+- Be specific. "This might have issues" is useless. "This SQL query on line 42 interpolates user input without parameterization, enabling SQL injection" is useful.
+- Be constructive. You're helping the author ship better code, not proving you're smart.
+- Don't nitpick style unless it genuinely hurts readability. Formatting, naming conventions, and import ordering are not your job unless they create confusion.
+- If the diff is truncated, note what you could and couldn't review. Don't speculate about code you haven't seen.
+- If the PR looks genuinely good, say so briefly and approve. Not every review needs a laundry list.
+- Never fabricate line numbers or code that isn't in the diff.${instructions}`;
 }
 
-function buildReviewPrompt(pr: PullRequest, diff: string, truncated: boolean): string {
-  const truncNote = truncated ? "\n\n⚠️ Note: The diff was truncated due to size. Review what's visible and note that you couldn't see everything." : "";
+// ── Prompt Builder ───────────────────────────────────────────────────────────
 
-  return `Please review this pull request.
+function buildReviewPrompt(
+  pr: PullRequest,
+  diff: string,
+  truncated: boolean,
+  comments: PRComment[],
+  reviews: PRReviewThread[],
+  commits: PRCommit[],
+): string {
+  const sections: string[] = [];
 
-## PR: ${pr.title}
+  // PR metadata
+  sections.push(`## Pull Request: ${pr.title}
 **Author:** ${pr.author}
-**Branch:** ${pr.headRef} → ${pr.baseRef}
-**Labels:** ${pr.labels.join(", ") || "none"}
+**Branch:** \`${pr.headRef}\` → \`${pr.baseRef}\`
+**Labels:** ${pr.labels.join(", ") || "none"}`);
 
-### Description
-${pr.body || "(no description provided)"}
+  // Description
+  sections.push(`### Description
+${pr.body || "(no description provided)"}`);
 
-### Diff
+  // Commits
+  if (commits.length > 0) {
+    const commitLines = commits.map((c) => `- \`${c.sha}\` ${c.message.split("\n")[0]} (${c.author})`);
+    sections.push(`### Commits (${commits.length})
+${commitLines.join("\n")}`);
+  }
+
+  // Existing reviews and inline comments
+  if (reviews.length > 0) {
+    const reviewSections: string[] = [];
+    for (const review of reviews) {
+      // Skip our own reviews
+      if (review.body.includes(SENTINEL_MARKER)) continue;
+
+      const stateLabel = formatReviewState(review.state);
+      let reviewText = `**${review.author}** ${stateLabel}`;
+      if (review.body) {
+        reviewText += `:\n${review.body}`;
+      }
+
+      // Inline comments on this review
+      if (review.comments.length > 0) {
+        const inlineLines = review.comments.map((c) => {
+          const location = c.line ? `\`${c.path}:${c.line}\`` : `\`${c.path}\``;
+          return `  - ${location} — **${c.author}**: ${c.body}`;
+        });
+        reviewText += `\n\nInline comments:\n${inlineLines.join("\n")}`;
+      }
+
+      reviewSections.push(reviewText);
+    }
+
+    if (reviewSections.length > 0) {
+      sections.push(`### Existing Reviews
+${reviewSections.join("\n\n---\n\n")}`);
+    }
+  }
+
+  // PR comments (general discussion, not inline)
+  const nonSentinelComments = comments.filter((c) => !c.body.includes(SENTINEL_MARKER));
+  if (nonSentinelComments.length > 0) {
+    const commentLines = nonSentinelComments.map(
+      (c) => `**${c.author}** (${formatDate(c.createdAt)}):\n${c.body}`,
+    );
+    sections.push(`### Discussion
+${commentLines.join("\n\n")}`);
+  }
+
+  // Diff
+  const truncNote = truncated
+    ? "\n\n⚠️ The diff was truncated due to size. Review what's visible and note that you couldn't see everything."
+    : "";
+
+  sections.push(`### Diff
 \`\`\`diff
 ${diff}
-\`\`\`
-${truncNote}`;
+\`\`\`${truncNote}`);
+
+  return sections.join("\n\n");
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function formatReviewState(state: string): string {
+  switch (state) {
+    case "APPROVED": return "✅ approved";
+    case "CHANGES_REQUESTED": return "❌ requested changes";
+    case "COMMENTED": return "💬 commented";
+    case "DISMISSED": return "🚫 review dismissed";
+    default: return state.toLowerCase();
+  }
+}
+
+function formatDate(iso: string): string {
+  try {
+    const d = new Date(iso);
+    return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  } catch {
+    return iso;
+  }
 }
 
 function parseVerdict(text: string, rc: ReviewerConfig): "APPROVE" | "REQUEST_CHANGES" | "COMMENT" {
