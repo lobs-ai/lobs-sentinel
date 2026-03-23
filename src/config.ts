@@ -117,8 +117,17 @@ export function loadConfig(
     throw new Error("No repos or orgs configured. Add repos/orgs to config.yaml or pass --repos/--orgs.");
   }
 
-  if (!env.ANTHROPIC_API_KEY) {
-    throw new Error("ANTHROPIC_API_KEY environment variable is required.");
+  // Check for LLM credentials based on model provider
+  const modelLower = config.model.toLowerCase();
+  const isOpenAI = modelLower.startsWith("openai/") || modelLower.startsWith("gpt-") || modelLower.startsWith("o1") || modelLower.startsWith("o3") || modelLower.startsWith("o4");
+  if (isOpenAI) {
+    if (!env.OPENAI_API_KEY) {
+      throw new Error("OPENAI_API_KEY environment variable is required for OpenAI models.");
+    }
+  } else {
+    if (!env.ANTHROPIC_API_KEY && !env.ANTHROPIC_AUTH_TOKEN) {
+      throw new Error("ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN environment variable is required.");
+    }
   }
 
   if (!env.GITHUB_TOKEN && !env.GH_TOKEN) {

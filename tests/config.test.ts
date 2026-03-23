@@ -94,10 +94,42 @@ orgs: [old-org]
       .toThrow("No repos or orgs configured");
   });
 
-  it("throws if ANTHROPIC_API_KEY is missing", () => {
+  it("throws if Anthropic credentials are missing for Anthropic model", () => {
     vi.mocked(fs.existsSync).mockReturnValue(false);
     expect(() => loadConfig(undefined, "reviewer", ["org/repo"], undefined, { GITHUB_TOKEN: "ghp_test" }))
-      .toThrow("ANTHROPIC_API_KEY");
+      .toThrow("ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN");
+  });
+
+  it("accepts ANTHROPIC_AUTH_TOKEN instead of ANTHROPIC_API_KEY", () => {
+    vi.mocked(fs.existsSync).mockReturnValue(false);
+    const config = loadConfig(undefined, "reviewer", ["org/repo"], undefined, {
+      ANTHROPIC_AUTH_TOKEN: "sk-ant-oat-test",
+      GITHUB_TOKEN: "ghp_test",
+    });
+    expect(config.repos).toEqual(["org/repo"]);
+  });
+
+  it("throws if OpenAI key is missing for OpenAI model", () => {
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.mocked(fs.readFileSync).mockReturnValue(`
+repos: [org/repo]
+model: openai/gpt-4o
+`);
+    expect(() => loadConfig("config.yaml", undefined, undefined, undefined, { GITHUB_TOKEN: "ghp_test" }))
+      .toThrow("OPENAI_API_KEY");
+  });
+
+  it("accepts OpenAI model with OPENAI_API_KEY", () => {
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.mocked(fs.readFileSync).mockReturnValue(`
+repos: [org/repo]
+model: openai/gpt-4o
+`);
+    const config = loadConfig("config.yaml", undefined, undefined, undefined, {
+      OPENAI_API_KEY: "sk-test",
+      GITHUB_TOKEN: "ghp_test",
+    });
+    expect(config.model).toBe("openai/gpt-4o");
   });
 
   it("throws if GITHUB_TOKEN is missing", () => {
