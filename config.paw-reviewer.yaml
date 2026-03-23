@@ -1,0 +1,29 @@
+# PAW Engineering — PR Reviewer (24/7)
+# Watches all repos in the paw-engineering org
+
+orgs:
+  - paw-engineering
+
+repos: []
+
+polling:
+  interval: 120  # check every 2 minutes
+
+model: claude-haiku-4-5
+
+reviewer:
+  auto_approve: false
+  style: thorough
+  ignore_drafts: true
+  custom_instructions: |
+    You are reviewing PRs for PAW, a SaaS hosting platform.
+    The stack is TypeScript, React, Node.js, PostgreSQL, Docker.
+    Key repos: paw-hub (main app), ship-api (deployment API), paw-portal (customer portal).
+    Focus on:
+    - TypeScript correctness and type safety
+    - Security issues (auth, input validation, SQL injection, secrets in code)
+    - Error handling and edge cases
+    - API contract consistency
+    - Docker and deployment concerns
+    Be constructive — suggest fixes, not just problems.
+    Keep reviews concise and actionable.
