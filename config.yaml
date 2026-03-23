@@ -1,0 +1,55 @@
+# lobs-sentinel configuration
+# Copy this file and customize for your use case.
+
+# Repositories to watch (owner/repo format)
+repos:
+  - paw-engineering/paw-hub
+  - paw-engineering/ship-api
+
+# Polling settings
+polling:
+  interval: 120  # seconds between polls
+
+# LLM model to use
+model: claude-sonnet-4-20250514
+
+# Log level: debug, info, warn, error
+# logLevel: info
+
+# ── PR Reviewer settings ────────────────────────────────────────────────────
+reviewer:
+  auto_approve: false      # if true, APPROVE verdicts become actual approvals
+  style: thorough          # thorough | quick | security-focused
+  ignore_drafts: true      # skip draft PRs
+  custom_instructions: |
+    Focus on TypeScript best practices.
+    Flag any security issues or potential data leaks.
+    Be constructive — suggest fixes, not just problems.
+
+# ── Labeler settings ────────────────────────────────────────────────────────
+labeler:
+  labels:
+    bug: "Something isn't working correctly"
+    feature: "New feature or enhancement request"
+    documentation: "Documentation improvements"
+    good-first-issue: "Simple enough for a new contributor"
+    security: "Security-related issue"
+    performance: "Performance improvement"
+  custom_instructions: ""
+
+# ── Triage settings ─────────────────────────────────────────────────────────
+triage:
+  priorities:
+    - critical
+    - high
+    - medium
+    - low
+  categories:
+    - bug
+    - feature
+    - question
+    - docs
+    - infrastructure
+  custom_instructions: |
+    Be welcoming to new contributors.
+    Ask for reproduction steps if a bug report is missing them.
