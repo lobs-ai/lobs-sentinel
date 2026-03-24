@@ -196,6 +196,8 @@ export function getFileContent(repo: string, ref: string, path: string): string 
 
 /**
  * Post a review on a PR.
+ * Falls back to COMMENT if REQUEST_CHANGES or APPROVE fails
+ * (e.g., can't request changes on your own PR).
  */
 export function submitReview(
   repo: string,
@@ -221,8 +223,26 @@ export function submitReview(
       break;
   }
 
-  ghRaw(args);
-  log.info(`Submitted ${event} review on ${repo}#${prNumber}`);
+  try {
+    ghRaw(args);
+    log.info(`Submitted ${event} review on ${repo}#${prNumber}`);
+  } catch (err) {
+    // If we can't approve/request-changes (e.g., reviewing own PR), fall back to comment
+    if (event !== "COMMENT") {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.warn(`Failed to submit ${event} review on ${repo}#${prNumber}, falling back to COMMENT: ${msg}`);
+      const fallbackArgs = [
+        "pr", "review", String(prNumber),
+        "--repo", repo,
+        "--body", body,
+        "--comment",
+      ];
+      ghRaw(fallbackArgs);
+      log.info(`Submitted COMMENT review on ${repo}#${prNumber} (fallback from ${event})`);
+    } else {
+      throw err;
+    }
+  }
 }
 
 /**

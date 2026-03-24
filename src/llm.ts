@@ -82,12 +82,12 @@ function createAnthropicClient(): Anthropic {
   const apiKey = process.env.ANTHROPIC_API_KEY;
 
   if (authToken) {
-    // OAuth token — needs special headers for Claude Code compatibility
+    // OAuth token — needs claude-code and oauth beta headers
     return new Anthropic({
       apiKey: null,
       authToken,
       defaultHeaders: {
-        "anthropic-beta": "interleaved-thinking-2025-05-14",
+        "anthropic-beta": "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14",
       },
     });
   }
@@ -98,7 +98,7 @@ function createAnthropicClient(): Anthropic {
       apiKey: null,
       authToken: apiKey,
       defaultHeaders: {
-        "anthropic-beta": "interleaved-thinking-2025-05-14",
+        "anthropic-beta": "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14",
       },
     });
   }
